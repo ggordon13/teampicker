@@ -120,16 +120,16 @@ export function buildUnits(players) {
 
 /* -------------------------------------------------------------- selection */
 
-/** All sub-collections of units whose sizes total exactly four. */
-function combosOfFour(units) {
+/** All sub-collections of units whose sizes total exactly `target`. */
+function combosOfSize(units, target) {
   const out = [];
   const walk = (start, current, sum) => {
-    if (sum === 4) {
+    if (sum === target) {
       out.push(current.slice());
       return;
     }
     for (let i = start; i < units.length; i++) {
-      if (sum + units[i].size > 4) continue;
+      if (sum + units[i].size > target) continue;
       current.push(units[i]);
       walk(i + 1, current, sum + units[i].size);
       current.pop();
@@ -138,6 +138,8 @@ function combosOfFour(units) {
   walk(0, [], 0);
   return out;
 }
+
+const combosOfFour = (units) => combosOfSize(units, 4);
 
 const SPLITS = [
   [[0, 1], [2, 3]],
@@ -262,6 +264,56 @@ function scoreMatch(match, stats, prevKey, lockedKeys) {
     W_IDLE_BONUS * idle +
     Math.random() * W_JITTER
   );
+}
+
+/**
+ * Take named players out of a pending match and pull replacements off the
+ * bench, leaving everyone else exactly where they are.
+ *
+ * Deliberately not a fresh draw: when one person taps out, the other three are
+ * already lined up for the game they were about to play, so only the vacated
+ * slots get refilled. `players` must be the *available* roster — anyone resting
+ * is simply absent from it, which is what keeps them off the bench list too.
+ *
+ * Returns the match untouched when nobody leaving was on court, or null when
+ * the bench cannot cover the gap.
+ */
+export function substituteMatch(players, stats, match, outIds, prevMatch = null) {
+  const out = new Set(outIds);
+  const keptA = match.a.filter((id) => !out.has(id));
+  const keptB = match.b.filter((id) => !out.has(id));
+  const needA = 2 - keptA.length;
+  const needB = 2 - keptB.length;
+  if (!needA && !needB) return match;
+
+  const onCourt = new Set([...match.a, ...match.b]);
+  const bench = buildUnits(players.filter((p) => !onCourt.has(p.id)));
+  const lockedKeys = new Set(
+    buildUnits(players)
+      .filter((u) => u.locked)
+      .map((u) => pairKey(u.ids[0], u.ids[1])),
+  );
+  const prevKey = prevMatch ? matchKey(prevMatch) : null;
+
+  let best = null;
+  let bestScore = Infinity;
+
+  for (const fillA of combosOfSize(bench, needA)) {
+    const taken = new Set(fillA.flatMap((u) => u.ids));
+    const left = bench.filter((u) => !u.ids.some((id) => taken.has(id)));
+    for (const fillB of combosOfSize(left, needB)) {
+      const candidate = {
+        a: [...keptA, ...fillA.flatMap((u) => u.ids)],
+        b: [...keptB, ...fillB.flatMap((u) => u.ids)],
+      };
+      const score = scoreMatch(candidate, stats, prevKey, lockedKeys);
+      if (score < bestScore) {
+        bestScore = score;
+        best = candidate;
+      }
+    }
+  }
+  return best;
 }
 
 export function matchKey(match) {

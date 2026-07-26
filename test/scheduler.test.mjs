@@ -6,6 +6,7 @@ import {
   generateMatch,
   buildUnits,
   matchKey,
+  substituteMatch,
 } from '../src/scheduler.js';
 
 function makePlayers(n) {
@@ -139,6 +140,96 @@ test('redraw falls back to the only matchup when there is no alternative', () =>
   const second = generateMatch(players, stats, null, matchKey(first));
   assert.ok(second, 'redraw should fall back rather than return nothing');
   assert.equal(matchKey(second), matchKey(first));
+});
+
+/* ---------------------------------------------------------- substitution */
+
+test('substituting one player keeps the other three exactly where they were', () => {
+  const players = makePlayers(8);
+  const stats = computeStats(players, []);
+  const match = generateMatch(players, stats, null);
+  const out = match.a[0];
+
+  const available = players.filter((p) => p.id !== out);
+  const next = substituteMatch(available, stats, match, [out]);
+
+  assert.ok(next, 'a bench of four should cover a single vacancy');
+  assert.ok(!next.a.includes(out) && !next.b.includes(out), 'the rester stayed on court');
+  assert.deepEqual(next.b, match.b, 'the far side should not have been touched');
+  assert.deepEqual(next.a.slice(0, 1), match.a.slice(1), 'the remaining partner was moved');
+  assert.equal(new Set([...next.a, ...next.b]).size, 4);
+});
+
+test('the substitute is drawn from the bench, never from thin air', () => {
+  const players = makePlayers(9);
+  const stats = computeStats(players, []);
+  const match = generateMatch(players, stats, null);
+  const out = match.b[1];
+  const available = players.filter((p) => p.id !== out);
+
+  const next = substituteMatch(available, stats, match, [out]);
+  const incoming = [...next.a, ...next.b].filter(
+    (id) => !match.a.includes(id) && !match.b.includes(id),
+  );
+  assert.equal(incoming.length, 1, 'exactly one new player should come on');
+  assert.ok(
+    available.some((p) => p.id === incoming[0]),
+    'the substitute must be an available player',
+  );
+});
+
+test('resting one half of a locked pair vacates both slots on that side', () => {
+  const players = lockPairs(makePlayers(12), 6);
+  const stats = computeStats(players, []);
+  const match = generateMatch(players, stats, null);
+  const [x, y] = match.a;
+
+  const available = players.filter((p) => p.id !== x && p.id !== y);
+  const next = substituteMatch(available, stats, match, [x, y]);
+
+  assert.ok(next, 'four locked pairs remain on the bench');
+  assert.deepEqual(next.b, match.b, 'the far side should not have been touched');
+  for (const id of [x, y]) {
+    assert.ok(![...next.a, ...next.b].includes(id), 'a rested player stayed on court');
+  }
+  // whoever came on must still be a whole locked pair
+  const mate = available.find((p) => p.id === next.a[0]).lockedWith;
+  assert.equal(mate, next.a[1], 'the incoming side is not an intact locked pair');
+});
+
+test('substitution returns null when the bench is empty', () => {
+  const players = makePlayers(5);
+  const stats = computeStats(players, []);
+  const match = generateMatch(players, stats, null);
+  const bench = players.find((p) => ![...match.a, ...match.b].includes(p.id));
+
+  // rest the only bench player *and* someone on court: nobody is left to come on
+  const available = players.filter((p) => p.id !== bench.id && p.id !== match.a[0]);
+  assert.equal(substituteMatch(available, stats, match, [bench.id, match.a[0]]), null);
+});
+
+test('resting someone already off court leaves the pending match untouched', () => {
+  const players = makePlayers(8);
+  const stats = computeStats(players, []);
+  const match = generateMatch(players, stats, null);
+  const bench = players.find((p) => ![...match.a, ...match.b].includes(p.id));
+
+  const available = players.filter((p) => p.id !== bench.id);
+  assert.equal(substituteMatch(available, stats, match, [bench.id]), match);
+});
+
+test('play continues to balance across whoever is still available', () => {
+  const players = makePlayers(10);
+  const resting = new Set([players[0].id, players[1].id]);
+  const available = players.filter((p) => !resting.has(p.id));
+
+  const { history, stats } = playSession(available, 24);
+  assert.ok(spread(available, stats) <= 1, 'available players fell out of balance');
+  for (const { match } of history) {
+    for (const id of [...match.a, ...match.b]) {
+      assert.ok(!resting.has(id), 'a resting player was drawn into a match');
+    }
+  }
 });
 
 test('a one-sided link is ignored rather than treated as a pair', () => {

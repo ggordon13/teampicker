@@ -1,6 +1,6 @@
-import { h, icon, ICONS } from '../dom.js';
+import { h, icon, ICONS, clear } from '../dom.js';
 import { getSport } from '../sports.js';
-import { slamMatch, celebrate, countTo } from '../anim.js';
+import { slamMatch, celebrate, countTo, pop } from '../anim.js';
 
 export default function matchScreen(ctx) {
   const { store } = ctx;
@@ -36,6 +36,7 @@ export default function matchScreen(ctx) {
   const declare = (side) => {
     if (locked) return;
     locked = true;
+    clearPick();
     const winnerEl = card.querySelector(`[data-side="${side}"]`);
     const loserEl = card.querySelector(`[data-side="${side === 'a' ? 'b' : 'a'}"]`);
     ctx.bg.pulse(side === 'a' ? sport.accent : sport.accent2);
@@ -45,11 +46,39 @@ export default function matchScreen(ctx) {
     );
   };
 
+  /* Tap a name on court to offer them a breather. Selection lives purely in the
+     DOM — a store update would repaint the whole screen and lose it. */
+  const subBar = h('div', { class: 'sub-bar', hidden: true });
+  let picked = null;
+
+  const clearPick = () => {
+    picked = null;
+    subBar.hidden = true;
+    clear(subBar);
+    for (const el of card.querySelectorAll('.pchip.is-picked')) {
+      el.classList.remove('is-picked');
+      el.setAttribute('aria-pressed', 'false');
+    }
+  };
+
+  const pickPlayer = (id, el) => {
+    if (locked) return; // a result is already being celebrated
+    const wasPicked = picked === id;
+    clearPick();
+    if (wasPicked) return; // tapping the same name again closes the prompt
+    picked = id;
+    el.classList.add('is-picked');
+    el.setAttribute('aria-pressed', 'true');
+    subBar.hidden = false;
+    subBar.append(...subPrompt(store, id, clearPick));
+    pop(subBar);
+  };
+
   card.append(
     courtGlyph(sport),
-    sidePanel(ctx, 'a', s.current.a, stats, scores, declare),
+    sidePanel(ctx, 'a', s.current.a, stats, scores, declare, pickPlayer),
     h('div', { class: 'vs-badge', 'data-vs': '' }, 'VS'),
-    sidePanel(ctx, 'b', s.current.b, stats, scores, declare),
+    sidePanel(ctx, 'b', s.current.b, stats, scores, declare, pickPlayer),
   );
 
   const resting = store.resting(s.current);
@@ -84,7 +113,8 @@ export default function matchScreen(ctx) {
       ),
     ),
     card,
-    balanceMeter(balance, s.players.length),
+    subBar,
+    balanceMeter(balance, store.available.length),
     h(
       'div',
       { class: 'match-tools', 'data-anim': '' },
@@ -104,7 +134,7 @@ export default function matchScreen(ctx) {
         : null,
     ),
     upcoming.length ? upNext(store, upcoming) : null,
-    resting.length ? restingRow(resting, stats) : null,
+    resting.length ? restingRow(store, resting, stats) : null,
   );
 
   // Slam the matchup in after the screen has mounted.
@@ -114,7 +144,44 @@ export default function matchScreen(ctx) {
 
 /* ------------------------------------------------------------- fragments */
 
-function sidePanel(ctx, side, ids, stats, scores, declare) {
+/**
+ * The prompt that drops in under the card once a name is tapped: who would sit
+ * out, and the button that actually does it.
+ */
+function subPrompt(store, id, cancel) {
+  const unit = store.restUnit(id);
+  const who = unit.map((x) => store.playerName(x)).join(' & ');
+  const blocked = !store.canRest(id);
+
+  return [
+    h(
+      'span',
+      { class: 'sub-who' },
+      unit.length > 1
+        ? `${who} are a locked pair — both would sit out`
+        : `${who} sits out until they tap back in`,
+    ),
+    blocked
+      ? h(
+          'span',
+          { class: 'sub-warn' },
+          `Only ${store.available.length} available — a match needs four on court.`,
+        )
+      : h(
+          'button',
+          {
+            class: 'btn btn-primary btn-sm',
+            type: 'button',
+            onclick: () => store.rest(id),
+          },
+          icon(ICONS.swap, 18),
+          'Redraw for substitution',
+        ),
+    h('button', { class: 'btn btn-ghost btn-sm', type: 'button', onclick: cancel }, 'Cancel'),
+  ];
+}
+
+function sidePanel(ctx, side, ids, stats, scores, declare, pickPlayer) {
   const { store } = ctx;
   const label = store.sideLabel(ids);
   const isFixed = store.state.mode === 'fixed';
@@ -142,9 +209,19 @@ function sidePanel(ctx, side, ids, stats, scores, declare) {
         h(
           'li',
           {},
-          h('span', { class: 'dot' }),
-          h('span', { class: 'pname' }, store.playerName(id)),
-          h('span', { class: 'pgames' }, `${stats.games[id] ?? 0}G`),
+          h(
+            'button',
+            {
+              class: 'pchip',
+              type: 'button',
+              'aria-pressed': 'false',
+              title: `Tap to rest ${store.playerName(id)}`,
+              onclick: (e) => pickPlayer(id, e.currentTarget),
+            },
+            h('span', { class: 'dot' }),
+            h('span', { class: 'pname' }, store.playerName(id)),
+            h('span', { class: 'pgames' }, `${stats.games[id] ?? 0}G`),
+          ),
         ),
       ),
     ),
@@ -206,16 +283,51 @@ function upNext(store, upcoming) {
   );
 }
 
-function restingRow(resting, stats) {
+/**
+ * Two different kinds of "not playing": rotated off for this game, and taking
+ * a deliberate break. Only the second is something you tap to undo.
+ */
+function restingRow(store, resting, stats) {
+  const onBreak = resting.filter((p) => p.resting);
+  const waiting = resting.filter((p) => !p.resting);
+
   return h(
     'div',
     { class: 'resting', 'data-anim': '' },
-    h('h3', { class: 'section-label' }, `Resting · ${resting.length}`),
-    h(
-      'div',
-      { class: 'rest-chips' },
-      resting.map((p) => h('span', { class: 'chip chip-rest' }, p.name, h('em', {}, `${stats.games[p.id] ?? 0}G`))),
-    ),
+    waiting.length
+      ? [
+          h('h3', { class: 'section-label' }, `Sitting out · ${waiting.length}`),
+          h(
+            'div',
+            { class: 'rest-chips' },
+            waiting.map((p) =>
+              h('span', { class: 'chip chip-rest' }, p.name, h('em', {}, `${stats.games[p.id] ?? 0}G`)),
+            ),
+          ),
+        ]
+      : null,
+    onBreak.length
+      ? [
+          h('h3', { class: 'section-label' }, `On a break · ${onBreak.length}`),
+          h(
+            'div',
+            { class: 'rest-chips' },
+            onBreak.map((p) =>
+              h(
+                'button',
+                {
+                  class: 'chip chip-rest chip-break',
+                  type: 'button',
+                  title: `Put ${p.name} back in the draw`,
+                  onclick: () => store.unrest(p.id),
+                },
+                p.name,
+                h('em', {}, 'tap to return'),
+              ),
+            ),
+          ),
+        ]
+      : null,
   );
 }
 

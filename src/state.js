@@ -4,12 +4,16 @@ import {
   previewQueue,
   balanceSpread,
   matchKey,
+  substituteMatch,
 } from './scheduler.js';
 
 const STORAGE_KEY = 'teampicker.session.v1';
 
 let uid = 0;
 export const nextId = (prefix = 'p') => `${prefix}${Date.now().toString(36)}${(uid++).toString(36)}`;
+
+/** Roster minus anyone taking a breather — the pool every draw is made from. */
+const activeRoster = (s) => s.players.filter((p) => !p.resting);
 
 function blankState() {
   return {
@@ -18,7 +22,7 @@ function blankState() {
     mode: 'fixed', // fixed | shuffle
     teamCount: 4,
     playerCount: 8,
-    players: [], // { id, name, teamId, teamName, lockedWith }
+    players: [], // { id, name, teamId, teamName, lockedWith, resting }
     teams: [], // { id, name } — fixed mode only
     history: [], // { id, match, winner, scoreA, scoreB, at }
     current: null, // match
@@ -50,16 +54,24 @@ class Store {
 
   /* ------------------------------------------------------------- derived */
 
+  /** Stats always cover the whole roster, so a rest never erases a record. */
   get stats() {
     return computeStats(this.state.players, this.state.history);
   }
 
-  get upcoming() {
-    return previewQueue(this.state.players, this.stats, this.state.current, 3);
+  /** Everyone still in the draw. */
+  get available() {
+    return activeRoster(this.state);
   }
 
+  get upcoming() {
+    return previewQueue(this.available, this.stats, this.state.current, 3);
+  }
+
+  /** Measured over available players only — a rester's frozen count is not
+   *  imbalance the scheduler can do anything about. */
   get balance() {
-    return balanceSpread(this.state.players, this.stats);
+    return balanceSpread(this.available, this.stats);
   }
 
   player(id) {
@@ -120,8 +132,8 @@ class Store {
           const old = s.teams[t];
           const team = { id: old?.id ?? nextId('t'), name: old?.name ?? `Team ${t + 1}` };
           teams.push(team);
-          const a = { id: nextId('p'), name: kept[t * 2] ?? '', teamId: team.id, teamName: team.name, lockedWith: null };
-          const b = { id: nextId('p'), name: kept[t * 2 + 1] ?? '', teamId: team.id, teamName: team.name, lockedWith: null };
+          const a = { id: nextId('p'), name: kept[t * 2] ?? '', teamId: team.id, teamName: team.name, lockedWith: null, resting: false };
+          const b = { id: nextId('p'), name: kept[t * 2 + 1] ?? '', teamId: team.id, teamName: team.name, lockedWith: null, resting: false };
           a.lockedWith = b.id;
           b.lockedWith = a.id;
           players.push(a, b);
@@ -137,6 +149,7 @@ class Store {
             teamId: null,
             teamName: null,
             lockedWith: null,
+            resting: false,
           });
         }
         s.teams = [];
@@ -186,6 +199,7 @@ class Store {
     this.update((s) => {
       s.history = [];
       s.startedAt = Date.now();
+      for (const p of s.players) p.resting = false;
       s.current = generateMatch(s.players, computeStats(s.players, []), null);
       s.screen = 'match';
     });
@@ -203,7 +217,7 @@ class Store {
         at: Date.now(),
       });
       const stats = computeStats(s.players, s.history);
-      s.current = generateMatch(s.players, stats, s.current);
+      s.current = generateMatch(activeRoster(s), stats, s.current);
     });
   }
 
@@ -221,7 +235,62 @@ class Store {
       const stats = computeStats(s.players, s.history);
       const prev = s.history.length ? s.history[s.history.length - 1].match : null;
       const banned = s.current ? matchKey(s.current) : null;
-      s.current = generateMatch(s.players, stats, prev, banned);
+      s.current = generateMatch(activeRoster(s), stats, prev, banned);
+    });
+  }
+
+  /* ----------------------------------------------------------------- rests */
+
+  /**
+   * A player plus their locked partner — the smallest group that can step off
+   * together. A locked pair is indivisible by definition, so resting one half
+   * has to rest both; leaving the partner in would pair them with a stranger,
+   * which is the exact thing locking exists to prevent.
+   */
+  restUnit(id) {
+    const player = this.player(id);
+    if (!player) return [];
+    const mate = player.lockedWith ? this.player(player.lockedWith) : null;
+    return mate && mate.lockedWith === player.id ? [player.id, mate.id] : [player.id];
+  }
+
+  /** False when stepping this group off would leave too few for a doubles match. */
+  canRest(id) {
+    const unit = this.restUnit(id);
+    if (!unit.length) return false;
+    return this.available.filter((p) => !unit.includes(p.id)).length >= 4;
+  }
+
+  /**
+   * Sit a player out until they tap back in, substituting someone off the bench
+   * into the pending match. Only the vacated slots change — the rest of the
+   * matchup is left alone.
+   */
+  rest(id) {
+    if (!this.canRest(id)) return false;
+    const unit = this.restUnit(id);
+    this.update((s) => {
+      for (const p of s.players) if (unit.includes(p.id)) p.resting = true;
+      if (!s.current) return;
+      const roster = activeRoster(s);
+      const stats = computeStats(s.players, s.history);
+      const prev = s.history.length ? s.history[s.history.length - 1].match : null;
+      s.current =
+        substituteMatch(roster, stats, s.current, unit, prev) ??
+        generateMatch(roster, stats, prev);
+    });
+    return true;
+  }
+
+  /**
+   * Put a rested player (and their locked partner) back in the draw. The
+   * pending match is left alone — they come on from the next game, which is
+   * guaranteed since sitting out leaves them with the fewest games played.
+   */
+  unrest(id) {
+    const unit = this.restUnit(id);
+    this.update((s) => {
+      for (const p of s.players) if (unit.includes(p.id)) p.resting = false;
     });
   }
 
@@ -235,6 +304,7 @@ class Store {
     this.update((s) => {
       s.history = [];
       s.startedAt = Date.now();
+      for (const p of s.players) p.resting = false;
       s.current = generateMatch(s.players, computeStats(s.players, []), null);
       s.screen = 'match';
     });
