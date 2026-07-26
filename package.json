@@ -1,0 +1,20 @@
+{
+  "name": "teampicker",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Gamified matchup generator for pickleball, tennis and other racket sports.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "gsap": "^3.13.0",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "vite": "^7.1.0"
+  }
+}
